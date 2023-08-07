@@ -1,0 +1,1 @@
+python main.py --data_path data/SG
