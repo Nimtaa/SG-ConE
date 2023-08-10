@@ -96,40 +96,36 @@ class KGReasoning(nn.Module):
         model.train()
         optimizer.zero_grad()
 
-        for train_queries, train_answers, train_indices in train_iterator:
-            break
+        for train_queries, train_answers, train_indices, train_positive, train_negative in train_iterator:
+            # break
+                
             
-        
-        # positive_sample, negative_sample, subsampling_weight, batch_queries = next(train_iterator)
+            # positive_sample, negative_sample, subsampling_weight, batch_queries = next(train_iterator)
 
-        positive_logit, negative_logit, _ = model(train_answers, train_answers, train_queries, train_indices)
-        # positive_logit, negative_logit, subsampling_weight, _ = model(positive_sample, negative_sample, subsampling_weight, batch_queries)
+            positive_logit, negative_logit, _ = model(train_answers, train_answers, train_queries, train_indices, train_positive, train_negative)
+            # positive_logit, negative_logit, subsampling_weight, _ = model(positive_sample, negative_sample, subsampling_weight, batch_queries)
 
-        subsampling_weight = 1
+            subsampling_weight = 1
 
-        print(positive_logit)
-        print(negative_logit)
-
-        negative_score = F.logsigmoid(-negative_logit).mean(dim=1).mean()
-        positive_score = F.logsigmoid(positive_logit).squeeze(dim=1).mean()
-        # positive_sample_loss = - (subsampling_weight * positive_score).sum()
-        # negative_sample_loss = - (subsampling_weight * negative_score).sum()
-        # positive_sample_loss /= subsampling_weight.sum()
-        # negative_sample_loss /= subsampling_weight.sum()
-        print(negative_score)
-        print(positive_score)
-        loss = ((-negative_score) + (-positive_score)) / 2
-        
-        
-        
-        # loss = (positive_sample_loss + negative_sample_loss) / 2
-        loss.backward()
-        optimizer.step()
-        log = {
-            'positive_sample_loss': positive_score.item(),
-            'negative_sample_loss': negative_score.item(),
-            'loss': loss.item(),
-        }
+            negative_score = F.logsigmoid(-negative_logit).mean(dim=1).mean()
+            positive_score = F.logsigmoid(positive_logit).squeeze(dim=1).mean()
+            # positive_sample_loss = - (subsampling_weight * positive_score).sum()
+            # negative_sample_loss = - (subsampling_weight * negative_score).sum()
+            # positive_sample_loss /= subsampling_weight.sum()
+            # negative_sample_loss /= subsampling_weight.sum()
+            loss = ((-negative_score) + (-positive_score)) / 2
+            
+            
+            
+            # loss = (positive_sample_loss + negative_sample_loss) / 2
+            loss.backward()
+            optimizer.step()
+            log = {
+                'positive_sample_loss': positive_score.item(),
+                'negative_sample_loss': negative_score.item(),
+                'loss': loss.item(),
+            }
+            print(log)
         return log
 
     def test_step(self, model, easy_answers, hard_answers, args, test_dataloader, query_name_dict, save_result=False, save_str="", save_empty=False):
@@ -210,8 +206,8 @@ class KGReasoning(nn.Module):
 
         return metrics
 
-    def embed_entity_cone(self, queries, query_structure, idx):
-        
+
+    def embed_query_cone(self, queries, query_structure, idx):
 
         axis_entity_embedding = torch.index_select(self.entity_embedding, dim=0, index=idx)
         
@@ -223,16 +219,9 @@ class KGReasoning(nn.Module):
             arg_entity_embedding = torch.zeros_like(axis_entity_embedding).cuda()
         else:
             arg_entity_embedding = torch.zeros_like(axis_entity_embedding)
-        idx += 1
 
         axis_embedding = axis_entity_embedding
         arg_embedding = arg_entity_embedding
-          
-        return axis_embedding, arg_embedding, idx
-
-    def embed_query_cone(self, queries, query_structure, idx):
-        axis_embedding, arg_embedding, idx = self.embed_entity_cone(queries, query_structure, idx)
-        
         
         axis_r_embedding = self.axis_embedding[0]
         arg_r_embedding = self.arg_embedding[0]
@@ -270,11 +259,11 @@ class KGReasoning(nn.Module):
         return logit
 
     # implement formatting forward method
-    def forward(self, positive_sample, negative_sample, batch_queries, indices):
+    def forward(self, positive_sample, negative_sample, batch_queries, query_indices, positive_indices, negative_indices):
         all_idxs, all_axis_embeddings, all_arg_embeddings = [], [], []
         
 
-        for query, idx in zip(batch_queries, indices):
+        for query, idx in zip(batch_queries, query_indices):
             
             axis_embedding, arg_embedding, _ = self.embed_query_cone(query, [], idx)
             
@@ -286,15 +275,14 @@ class KGReasoning(nn.Module):
             all_axis_embeddings = torch.cat(all_axis_embeddings, dim=0).unsqueeze(1)
             all_arg_embeddings = torch.cat(all_arg_embeddings, dim=0).unsqueeze(1)
         
+       
         # if type(subsampling_weight) != type(None):
         #     subsampling_weight = subsampling_weight[all_idxs]
 
         if type(positive_sample) != type(None):
             if len(all_axis_embeddings) > 0:
-                # positive samples for non-union queries in this batch
-                # positive_sample_regular = positive_sample[all_idxs]
-                positive_embedding = torch.index_select(self.entity_embedding, dim=0, index=indices).unsqueeze(1)
-
+                positive_embedding = torch.index_select(self.entity_embedding, dim=0, index=positive_indices).unsqueeze(1)
+    	        
                 positive_embedding = self.angle_scale(positive_embedding, self.axis_scale)
                 positive_embedding = convert_to_axis(positive_embedding)
 
@@ -311,7 +299,7 @@ class KGReasoning(nn.Module):
                 # negative_sample_regular = negative_sample[all_idxs]
                 # batch_size, negative_size = negative_sample_regular.shape
 
-                negative_embedding = torch.index_select(self.entity_embedding, dim=0, index=indices).unsqueeze(1)
+                negative_embedding = torch.index_select(self.entity_embedding, dim=0, index=negative_indices).unsqueeze(1)
 
                 # negative_embedding = torch.index_select(self.entity_embedding, dim=0, index=negative_sample_regular.view(-1)).view(batch_size, negative_size, -1)
                 negative_embedding = self.angle_scale(negative_embedding, self.axis_scale)

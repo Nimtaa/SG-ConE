@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import pickle
+import math
 from collections import defaultdict
 
 import numpy as np
@@ -32,10 +33,7 @@ def parse_args(args=None):
 
 
 def load_data(args):
-    
-    with open(os.path.join(args.data_path, 'interesting_queries_mask.pkl'), 'rb') as f:
-        valid_queries_mask = pickle.load(f)
-    
+       
     train_queries = torch.load(os.path.join(args.data_path,'train_input.pt'))
     test_queries = torch.load(os.path.join(args.data_path,'test_input.pt'))
     val_queries = torch.load(os.path.join(args.data_path,'val_input.pt'))
@@ -47,9 +45,34 @@ def load_data(args):
     val_indices = torch.from_numpy(torch.load(os.path.join(args.data_path,'val_indices.pt'))).cuda()
     test_indices = torch.from_numpy(torch.load(os.path.join(args.data_path,'test_indices.pt'))).cuda()
     
-    
+    train_positive_indices = []
+    train_negative_indices = []
+    test_positive_indices = []
+    test_negative_indices = []
+    val_positive_indices = []
+    val_negative_indices = []
 
-    return train_queries, test_queries, val_queries, train_answers, test_answers, val_answers, train_indices, val_indices, test_indices, valid_queries_mask
+    for idx in train_indices:
+        train_positive_indices.append(math.floor(idx/2) + (args.nentity//3))
+        train_negative_indices.append(math.floor(idx/2) + (args.nentity//3) - 10)
+
+    for idx in test_indices:
+        test_positive_indices.append(math.floor(idx/2) + (args.nentity//3))
+        test_negative_indices.append(math.floor(idx/2) + (args.nentity//3) - 10)
+
+    for idx in val_indices:
+        val_positive_indices.append(math.floor(idx/2) + (args.nentity//3))
+        val_negative_indices.append(math.floor(idx/2) + (args.nentity//3) - 10)
+
+    train_positive_indices = torch.from_numpy(np.array(train_positive_indices)).cuda()
+    train_negative_indices = torch.from_numpy(np.array(train_negative_indices)).cuda()
+    test_positive_indices = torch.from_numpy(np.array(test_positive_indices)).cuda()
+    test_negative_indices = torch.from_numpy(np.array(test_negative_indices)).cuda()
+    val_positive_indices = torch.from_numpy(np.array(val_positive_indices)).cuda()
+    val_negative_indices = torch.from_numpy(np.array(val_negative_indices)).cuda()
+
+
+    return train_queries, test_queries, val_queries, train_answers, test_answers, val_answers, train_indices, val_indices, test_indices, train_positive_indices, train_negative_indices, val_positive_indices, val_negative_indices, test_positive_indices, test_negative_indices
 
 
 
@@ -70,13 +93,11 @@ def main(args):
     args.test_batch_size = 1
     args.drop = 0.05
 
-    train_queries, test_queries, val_queries, train_answers, test_answers, val_answers, train_indices, val_indices, test_indices, valid_queries_mask = load_data(args)
+    train_queries, test_queries, val_queries, train_answers, test_answers, val_answers, train_indices, val_indices, test_indices, train_positive_indices, train_negative_indices, val_positive_indices, val_negative_indices, test_positive_indices, test_negative_indices = load_data(args)
 
-    train_dataset = TensorDataset(train_queries, train_answers, train_indices)
-    test_dataset = TensorDataset(test_queries, test_answers, test_indices)
-    val_dataset = TensorDataset(val_queries, val_answers, val_indices)
-
-    
+    train_dataset = TensorDataset(train_queries, train_answers, train_indices, train_positive_indices, train_negative_indices)
+    test_dataset = TensorDataset(test_queries, test_answers, test_indices, test_positive_indices, test_negative_indices)
+    val_dataset = TensorDataset(val_queries, val_answers, val_indices, val_positive_indices, val_negative_indices)
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
@@ -104,7 +125,12 @@ def main(args):
         lr=current_learning_rate
     )
 
-    model.train_step(model, optimizer, train_dataloader, args)
+    torch.autograd.set_detect_anomaly(True)
+
+    for epoch in range(20):
+        print(f'epoch: {epoch+1}')
+        log = model.train_step(model, optimizer, train_dataloader, args)
+
 
 
 
