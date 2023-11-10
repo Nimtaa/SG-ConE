@@ -5,8 +5,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import tqdm
-
+from tqdm import tqdm
+import math
+from collections import defaultdict
+import pickle
 
 pi = 3.14159265358979323846
 
@@ -31,10 +33,11 @@ class AngleScale:
 
 
 class KGReasoning(nn.Module):
-    def __init__(self, nentity, nrelation, hidden_dim, gamma, test_batch_size=1, use_cuda=False, query_name_dict=None, center_reg=None, drop=0.):
+    def __init__(self, nentity, nrelation, entity_embs, hidden_dim, gamma, test_batch_size=1, use_cuda=False, query_name_dict=None, center_reg=None, drop=0.):
         super(KGReasoning, self).__init__()
         self.nentity = nentity
         self.nrelation = nrelation
+        self.entity_embs = entity_embs
         self.hidden_dim = hidden_dim
         self.epsilon = 2.0
         self.use_cuda = use_cuda
@@ -58,8 +61,17 @@ class KGReasoning(nn.Module):
         self.cen = center_reg
 
         # entity only have axis but no arg
-        self.entity_embedding = nn.Parameter(torch.zeros(nentity, self.entity_dim),
-                                             requires_grad=True)  # axis for entities
+        # self.entity_embedding = nn.Parameter(torch.zeros(nentity, self.entity_dim),
+        #                                      requires_grad=True)  # axis for entities
+        
+        # self.entity_embedding = nn.Parameter(torch.clamp(entity_embs, -self.embedding_range.item(), 
+        #                                                  self.embedding_range.item()), requires_grad=True)
+        
+        
+        #TODO I changed to entity_embedding req grad False from true
+        self.entity_embedding = nn.Parameter(entity_embs, requires_grad = False)
+        print(self.entity_embedding.shape)
+
         self.angle_scale = AngleScale(self.embedding_range.item())  # scale axis embeddings to [-pi, pi]
 
         self.modulus = nn.Parameter(torch.Tensor([0.5 * self.embedding_range.item()]), requires_grad=True)
@@ -67,11 +79,11 @@ class KGReasoning(nn.Module):
         self.axis_scale = 1.0
         self.arg_scale = 1.0
 
-        nn.init.uniform_(
-            tensor=self.entity_embedding,
-            a=-self.embedding_range.item(),
-            b=self.embedding_range.item()
-        )
+        # nn.init.uniform_(
+        #     tensor=self.entity_embedding,
+        #     a=-self.embedding_range.item(),
+        #     b=self.embedding_range.item()
+        # )
 
         self.axis_embedding = nn.Parameter(torch.zeros(nrelation, self.relation_dim), requires_grad=True)
         nn.init.uniform_(
@@ -95,16 +107,12 @@ class KGReasoning(nn.Module):
     def train_step(self, model, optimizer, train_iterator, args):
         model.train()
         optimizer.zero_grad()
-
+        # for train_queries, train_positive, train_negative in train_iterator:
         for train_queries, train_answers, train_indices, train_positive, train_negative in train_iterator:
-            # break
-                
             
-            # positive_sample, negative_sample, subsampling_weight, batch_queries = next(train_iterator)
-
             positive_logit, negative_logit, _ = model(train_answers, train_answers, train_queries, train_indices, train_positive, train_negative)
-            # positive_logit, negative_logit, subsampling_weight, _ = model(positive_sample, negative_sample, subsampling_weight, batch_queries)
-
+            # positive_logit, negative_logit, _ = model(train_queries, train_queries, train_queries, train_queries, train_positive, train_negative)
+   
             subsampling_weight = 1
 
             negative_score = F.logsigmoid(-negative_logit).mean(dim=1).mean()
@@ -115,96 +123,81 @@ class KGReasoning(nn.Module):
             # negative_sample_loss /= subsampling_weight.sum()
             loss = ((-negative_score) + (-positive_score)) / 2
             
-            
-            
             # loss = (positive_sample_loss + negative_sample_loss) / 2
             loss.backward()
             optimizer.step()
             log = {
-                'positive_sample_loss': positive_score.item(),
-                'negative_sample_loss': negative_score.item(),
+                'positive_sample_loss': -positive_score.item(),
+                'negative_sample_loss': -negative_score.item(),
                 'loss': loss.item(),
             }
-            print(log)
         return log
 
-    def test_step(self, model, easy_answers, hard_answers, args, test_dataloader, query_name_dict, save_result=False, save_str="", save_empty=False):
+    def test_step(self, model, test_iterator, train_indices):
+        
         model.eval()
-
-        step = 0
-        total_steps = len(test_dataloader)
-        logs = collections.defaultdict(list)
-
+        eval_result = collections.defaultdict(list)
+        pos_logit = [] 
+        neg_logit = []
+        answer_idx = [] 
+        i = 0
+        top5_answer = defaultdict(list)
         with torch.no_grad():
-            for negative_sample, queries, queries_unflatten, query_structures in tqdm(test_dataloader, disable=not args.print_on_screen):
-                batch_queries_dict = collections.defaultdict(list)
-                batch_idxs_dict = collections.defaultdict(list)
-                for i, query in enumerate(queries):
-                    batch_queries_dict[query_structures[i]].append(query)
-                    batch_idxs_dict[query_structures[i]].append(i)
-                for query_structure in batch_queries_dict:
-                    if args.cuda:
-                        batch_queries_dict[query_structure] = torch.LongTensor(batch_queries_dict[query_structure]).cuda()
-                    else:
-                        batch_queries_dict[query_structure] = torch.LongTensor(batch_queries_dict[query_structure])
-                if args.cuda:
-                    negative_sample = negative_sample.cuda()
+            # for test_queries, test_positive, test_negative in test_iterator:
+            for test_queries, test_answers, test_indices, test_positive, _ in (test_iterator):
+                test_negative = torch.LongTensor(range(self.nentity)).cuda()
+                # test_negative = torch.LongTensor(range(118158,177237)).cuda()
+                
+                if i>100:
+                    break
+                
+                tt = torch.IntTensor([i]).cuda()
+                
+                positive_logit, negative_logit, _ = model(None, test_queries, test_queries, test_indices, None, test_negative)
+            
+                # positive_sample, negative_sample, batch_queries, query_indices, positive_indices, negative_indices): 
+                
+                # pos_logit.append(positive_logit.item())
+                # print(negative_logit.shape)
+                neg_logit.append(negative_logit)
+                
+                
+                # answer_idx.append(torch.argsort(negative_logit, dim=1, descending=True).tolist()[0].index(math.floor(test_indices/2) + (177237//3)*2))
+                
+                # idx = list(range(118158, 177237)).index(math.floor(test_indices/2) + (177237//3)*2)
+                # answer_idx.append(torch.argsort(negative_logit, dim=1, descending=True).tolist()[0].index(idx))
+                
+                
+                # idx = math.floor(tt.item()/2) + (177237//3)*2
+                idx = math.floor(test_indices.item()/2) + (177237//3)*2
+                answer_idx.append(torch.argsort(negative_logit, dim=1, descending=True).tolist()[0].index(idx))
+                
+                # print(torch.argsort(negative_logit, dim=1, descending=True).tolist()[0].index(idx))
+                print(torch.argsort(negative_logit, dim=1, descending=True).tolist()[0].index(idx))
+                # print(np.mean(np.array(answer_idx)))
+                top5_answer[test_indices.item()].extend([torch.argsort(negative_logit, dim=1, descending=True).cpu().tolist()[0][:10]])
+                
+                # print(train_indices[i])
+                # print(test_indices)
+                # print(torch.argsort(negative_logit, dim=1, descending=True)[0, :10])
+                i +=1
+                
+                # print('###gt###', test_positive[:10])s
+                # neg_logit.append(negative_logit.mean().item())
+                #  positive_sample, negative_sample, batch_queries, query_indices, positive_indices, negative_indices):
+                
+                # neg_argsort = torch.argsort(negative_logit, dim=1, descending=True)
+                # neg_ranking = neg_argsort.clone().to(torch.float)
+                # pos_argsort = torch.argsort(positive_logit, dim=1, descending=True)
+                # pos_ranking = pos_argsort.clone().to(torch.float)
 
-                _, negative_logit, _, idxs = model(None, negative_sample, None, batch_queries_dict, batch_idxs_dict)
-
-                queries_unflatten = [queries_unflatten[i] for i in idxs]
-                query_structures = [query_structures[i] for i in idxs]
-                argsort = torch.argsort(negative_logit, dim=1, descending=True)
-                ranking = argsort.clone().to(torch.float)
-                if len(argsort) == args.test_batch_size: 
-                    ranking = ranking.scatter_(1, argsort, model.batch_entity_range) 
-                else: 
-                    if args.cuda:
-                        ranking = ranking.scatter_(1, argsort, torch.arange(model.nentity).to(torch.float).repeat(argsort.shape[0], 1).cuda())  
-                    else:
-                        ranking = ranking.scatter_(1, argsort, torch.arange(model.nentity).to(torch.float).repeat(argsort.shape[0], 1)) 
-
-                for idx, (i, query, query_structure) in enumerate(zip(argsort[:, 0], queries_unflatten, query_structures)):
-                    hard_answer = hard_answers[query]
-                    easy_answer = easy_answers[query]
-
-                    num_hard = len(hard_answer)
-                    num_easy = len(easy_answer)
-                    assert len(hard_answer.intersection(easy_answer)) == 0
-
-                    cur_ranking = ranking[idx, list(easy_answer) + list(hard_answer)]
-                    cur_ranking, indices = torch.sort(cur_ranking)
-                    masks = indices >= num_easy
-                    if args.cuda:
-                        answer_list = torch.arange(num_hard + num_easy).to(torch.float).cuda()
-                    else:
-                        answer_list = torch.arange(num_hard + num_easy).to(torch.float)
-                    cur_ranking = cur_ranking - answer_list + 1  # filtered setting
-                    cur_ranking = cur_ranking[masks]  # only take indices that belong to the hard answers
-
-                    mrr = torch.mean(1. / cur_ranking).item()
-                    h1 = torch.mean((cur_ranking <= 1).to(torch.float)).item()
-                    h3 = torch.mean((cur_ranking <= 3).to(torch.float)).item()
-                    h10 = torch.mean((cur_ranking <= 10).to(torch.float)).item()
-
-                    logs[query_structure].append({
-                        'MRR': mrr,
-                        'HITS1': h1,
-                        'HITS3': h3,
-                        'HITS10': h10,
-                    })
-                if step % args.test_log_steps == 0:
-                    logging.info('Evaluating the model... (%d/%d)' % (step, total_steps))
-
-                step += 1
-        metrics = collections.defaultdict(lambda: collections.defaultdict(int))
-        for query_structure in logs:
-            for metric in logs[query_structure][0].keys():
-                metrics[query_structure][metric] = sum([log[metric] for log in logs[query_structure]]) / len(
-                    logs[query_structure])
-            metrics[query_structure]['num_queries'] = len(logs[query_structure])
-
-        return metrics
+        # print(np.mean(pos_logit), 'pos logit')
+        # print(np.mean(neg_logit), 'neg logit')
+        
+        # print(np.mean(np.array(answer_idx)))
+        with open('top5_answer.pkl', 'wb') as f:
+            pickle.dump(top5_answer, f)
+        return None
 
 
     def embed_query_cone(self, queries, query_structure, idx):
@@ -234,10 +227,11 @@ class KGReasoning(nn.Module):
 
         axis_r_embedding = convert_to_axis(axis_r_embedding)
         arg_r_embedding = convert_to_axis(arg_r_embedding)
-
+        
         axis_embedding, arg_embedding = self.cone_proj(axis_embedding, arg_embedding, axis_r_embedding, arg_r_embedding)
+        
         return axis_embedding, arg_embedding, idx
-
+    
 
     # implement distance function
     def cal_logit_cone(self, entity_embedding, query_axis_embedding, query_arg_embedding):
@@ -260,15 +254,14 @@ class KGReasoning(nn.Module):
 
     # implement formatting forward method
     def forward(self, positive_sample, negative_sample, batch_queries, query_indices, positive_indices, negative_indices):
-        all_idxs, all_axis_embeddings, all_arg_embeddings = [], [], []
         
+        all_idxs, all_axis_embeddings, all_arg_embeddings = [], [], []
 
-        for query, idx in zip(batch_queries, query_indices):
-            
-            axis_embedding, arg_embedding, _ = self.embed_query_cone(query, [], idx)
-            
-            all_axis_embeddings.append(axis_embedding)
-            all_arg_embeddings.append(arg_embedding)
+        # for query, idx in zip(batch_queries, query_indices):
+        
+        axis_embedding, arg_embedding, _ = self.embed_query_cone(batch_queries, [], query_indices)
+        all_axis_embeddings.append(axis_embedding)
+        all_arg_embeddings.append(arg_embedding)
 
             
         if len(all_axis_embeddings) > 0:
@@ -278,6 +271,7 @@ class KGReasoning(nn.Module):
        
         # if type(subsampling_weight) != type(None):
         #     subsampling_weight = subsampling_weight[all_idxs]
+        
 
         if type(positive_sample) != type(None):
             if len(all_axis_embeddings) > 0:
@@ -295,11 +289,15 @@ class KGReasoning(nn.Module):
             positive_logit = None
 
         if type(negative_sample) != type(None):
+            
             if len(all_axis_embeddings) > 0:
+                
                 # negative_sample_regular = negative_sample[all_idxs]
-                # batch_size, negative_size = negative_sample_regular.shape
-
-                negative_embedding = torch.index_select(self.entity_embedding, dim=0, index=negative_indices).unsqueeze(1)
+                batch_size, negative_size = negative_sample.shape
+                # batch_size, negative_size = negative_indices.shape
+                # negative_embedding = torch.index_select(self.entity_embedding, dim=0, index=negative_indices.view(-1)).view(batch_size, 128, -1)
+                negative_embedding = torch.index_select(self.entity_embedding, dim=0, index=negative_indices.view(-1))
+                 
 
                 # negative_embedding = torch.index_select(self.entity_embedding, dim=0, index=negative_sample_regular.view(-1)).view(batch_size, negative_size, -1)
                 negative_embedding = self.angle_scale(negative_embedding, self.axis_scale)
@@ -309,7 +307,6 @@ class KGReasoning(nn.Module):
             else:
                 negative_logit = torch.Tensor([]).to(self.entity_embedding.device)
 
-            
             negative_logit = torch.cat([negative_logit], dim=0)
         else:
             negative_logit = None
@@ -333,12 +330,15 @@ class ConeProjection(nn.Module):
             nn.init.xavier_uniform_(getattr(self, "layer{}".format(nl)).weight)
 
     def forward(self, source_embedding_axis, source_embedding_arg, r_embedding_axis, r_embedding_arg):
+        
         x = torch.cat([source_embedding_axis + r_embedding_axis, source_embedding_arg + r_embedding_arg], dim=-1)
+
         for nl in range(1, self.num_layers + 1):
             x = F.relu(getattr(self, "layer{}".format(nl))(x))
         x = self.layer0(x)
-
         axis, arg = torch.chunk(x, 2, dim=-1)
+        
         axis_embeddings = convert_to_axis(axis)
         arg_embeddings = convert_to_arg(arg)
+        
         return axis_embeddings, arg_embeddings
